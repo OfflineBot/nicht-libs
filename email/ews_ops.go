@@ -19,9 +19,9 @@ type getAttachmentResponse struct {
 	Messages []getAttachmentMsg `xml:"ResponseMessages>GetAttachmentResponseMessage"`
 }
 type getAttachmentMsg struct {
-	ResponseClass string           `xml:"ResponseClass,attr"`
-	MessageText   string           `xml:"MessageText"`
-	Attachments   []ewsFullAttach  `xml:"Attachments>FileAttachment"`
+	ResponseClass string          `xml:"ResponseClass,attr"`
+	MessageText   string          `xml:"MessageText"`
+	Attachments   []ewsFullAttach `xml:"Attachments>FileAttachment"`
 }
 type ewsFullAttach struct {
 	Name        string `xml:"Name"`
@@ -65,10 +65,57 @@ type sendItemMsg struct {
 }
 
 // OutboundAttachment is a file to be attached to an outgoing email.
+//
+// ContentID and Inline are for images that belong *in* the message body: the
+// HTML references them as <img src="cid:the-id">, and the client renders them
+// in place instead of listing them at the bottom. Without both, an image can
+// only travel as a normal attachment — a data: URI in the body is stripped by
+// Outlook and most webmail, so that is not an alternative.
 type OutboundAttachment struct {
 	Filename    string
 	ContentType string
 	Data        []byte
+	// ContentID is the value the body refers to with cid:. Empty for a
+	// normal attachment.
+	ContentID string
+	// Inline marks the attachment as part of the body rather than a file
+	// hanging off it.
+	Inline bool
+}
+
+// attachmentXML builds the <t:Attachments> children for a set of outgoing
+// attachments. Split out so the element order — which EWS is strict about —
+// can be checked without a server.
+func attachmentXML(attachments []OutboundAttachment) string {
+	var b strings.Builder
+	for _, a := range attachments {
+		ct := a.ContentType
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		b.WriteString(einAnhangXML(a, ct))
+	}
+	return b.String()
+}
+
+func einAnhangXML(a OutboundAttachment, ct string) string {
+	// Element order matters: the EWS schema declares AttachmentType as a
+	// sequence, so ContentId and IsInline must sit between ContentType and
+	// Content. Out of order, Exchange rejects the whole request.
+	extra := ""
+	if a.ContentID != "" {
+		extra += fmt.Sprintf("\n      <t:ContentId>%s</t:ContentId>", xmlEscape(a.ContentID))
+	}
+	if a.Inline {
+		extra += "\n      <t:IsInline>true</t:IsInline>"
+	}
+	return fmt.Sprintf(`
+    <t:FileAttachment>
+      <t:Name>%s</t:Name>
+      <t:ContentType>%s</t:ContentType>%s
+      <t:Content>%s</t:Content>
+    </t:FileAttachment>`, xmlEscape(a.Filename), xmlEscape(ct), extra,
+		base64.StdEncoding.EncodeToString(a.Data))
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -277,12 +324,7 @@ func (c *ewsClient) sendEmailWithAttachments(to, cc, bcc []string, subject, body
 		if ct == "" {
 			ct = "application/octet-stream"
 		}
-		attachXML.WriteString(fmt.Sprintf(`
-    <t:FileAttachment>
-      <t:Name>%s</t:Name>
-      <t:ContentType>%s</t:ContentType>
-      <t:Content>%s</t:Content>
-    </t:FileAttachment>`, xmlEscape(a.Filename), xmlEscape(ct), base64.StdEncoding.EncodeToString(a.Data)))
+		attachXML.WriteString(einAnhangXML(a, ct))
 	}
 	attachResp, err := c.do(fmt.Sprintf(`
 <m:CreateAttachment>

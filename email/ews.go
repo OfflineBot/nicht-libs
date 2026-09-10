@@ -11,7 +11,6 @@ package email
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -190,6 +189,7 @@ type ewsItem struct {
 	Subject        string             `xml:"Subject"`
 	From           ewsMailbox         `xml:"From>Mailbox"`
 	ToRecipients   []ewsMailbox       `xml:"ToRecipients>Mailbox"`
+	CcRecipients   []ewsMailbox       `xml:"CcRecipients>Mailbox"`
 	DateTimeSent   string             `xml:"DateTimeSent"`
 	IsRead         bool               `xml:"IsRead"`
 	HasAttachments bool               `xml:"HasAttachments"`
@@ -919,17 +919,29 @@ func summaryFromEWS(item ewsItem) EmailSummary {
 			break
 		}
 	}
-	if len(item.ToRecipients) > 0 {
-		s.ToRecipients = make([]string, 0, len(item.ToRecipients))
-		for _, mb := range item.ToRecipients {
-			if mb.EmailAddress != "" {
-				s.ToRecipients = append(s.ToRecipients, mb.EmailAddress)
-			} else if mb.Name != "" {
-				s.ToRecipients = append(s.ToRecipients, mb.Name)
-			}
+	s.ToRecipients = adressen(item.ToRecipients)
+	s.CcRecipients = adressen(item.CcRecipients)
+	return s
+}
+
+// adressen macht aus einer Empfängerliste Adressen — die Adresse, sonst der
+// Name. nil bei einer leeren Liste.
+//
+// Gefüllt ist sie nur bei GetItem: FindItem liefert keine Empfänger, auch
+// wenn man danach fragt.
+func adressen(mbs []ewsMailbox) []string {
+	if len(mbs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(mbs))
+	for _, mb := range mbs {
+		if mb.EmailAddress != "" {
+			out = append(out, mb.EmailAddress)
+		} else if mb.Name != "" {
+			out = append(out, mb.Name)
 		}
 	}
-	return s
+	return out
 }
 
 func bodyTypeStr(html bool) string {
@@ -1164,25 +1176,15 @@ func (c *ewsClient) forwardItemFull(itemID string, to []string, body, bodyType s
 
 // addAttachmentsToDraft adds file attachments to a draft item and returns the new ChangeKey.
 func (c *ewsClient) addAttachmentsToDraft(itemID, changeKey string, attachments []OutboundAttachment) (string, error) {
-	var attachXML strings.Builder
-	for _, a := range attachments {
-		ct := a.ContentType
-		if ct == "" {
-			ct = "application/octet-stream"
-		}
-		attachXML.WriteString(fmt.Sprintf(`
-    <t:FileAttachment>
-      <t:Name>%s</t:Name>
-      <t:ContentType>%s</t:ContentType>
-      <t:Content>%s</t:Content>
-    </t:FileAttachment>`, xmlEscape(a.Filename), xmlEscape(ct), base64.StdEncoding.EncodeToString(a.Data)))
-	}
+	// Über attachmentXML, nicht eine eigene Fassung: diese kannte ContentId
+	// und IsInline nicht, und ein eingefügtes Bild kam als loser Anhang an,
+	// das <img src="cid:…"> im Text ins Leere.
 	resp, err := c.do(fmt.Sprintf(`
 <m:CreateAttachment>
   <m:ParentItemId Id="%s" ChangeKey="%s"/>
   <m:Attachments>%s
   </m:Attachments>
-</m:CreateAttachment>`, xmlEscape(itemID), xmlEscape(changeKey), attachXML.String()), "CreateAttachment")
+</m:CreateAttachment>`, xmlEscape(itemID), xmlEscape(changeKey), attachmentXML(attachments)), "CreateAttachment")
 	if err != nil {
 		return "", err
 	}

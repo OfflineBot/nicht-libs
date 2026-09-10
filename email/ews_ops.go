@@ -178,6 +178,30 @@ func UpdateDraft(server, username, password, itemID string, to, cc []string, sub
 	return c.updateDraft(itemID, to, cc, subject, body, bodyTypeStr(html))
 }
 
+// SendDraft schickt einen Entwurf ab — ihn selbst, nicht eine neue Mail mit
+// seinem Text. Was an ihm hängt, bleibt dran, auch Anhänge, die er in
+// Outlook bekommen hat; neue kommen vorher dazu. Danach liegt er in
+// „Gesendet" und nicht mehr in den Entwürfen.
+//
+// Dieselben Schritte wie SendEmailWithAttachments, nur ohne das Anlegen:
+// schreiben, anhängen, SendItem.
+func SendDraft(server, username, password, itemID string, to, cc, bcc []string, subject, body string, html bool, attachments []OutboundAttachment) error {
+	c := newEWSClient(server, username, password)
+	changeKey, err := c.draftAktualisieren(itemID, to, cc, bcc, subject, body, bodyTypeStr(html))
+	if err != nil {
+		return err
+	}
+	if len(attachments) > 0 {
+		if changeKey, err = c.addAttachmentsToDraft(itemID, changeKey, attachments); err != nil {
+			return err
+		}
+	}
+	if changeKey == "" {
+		return fmt.Errorf("SendDraft: Exchange hat keinen ChangeKey geliefert")
+	}
+	return c.sendDraftItem(itemID, changeKey)
+}
+
 // SendEmailWithAttachments sends an email with file attachments via EWS.
 // Uses a 3-step flow: CreateItem(SaveOnly) → CreateAttachment → SendItem.
 func SendEmailWithAttachments(server, username, password string, to, cc, bcc []string, subject, body string, html bool, attachments []OutboundAttachment) error {
@@ -650,7 +674,14 @@ func (c *ewsClient) saveDraft(to, cc []string, subject, body, bodyType string) (
 	return msg.Items[0].ItemID.ID, nil
 }
 
-func (c *ewsClient) updateDraft(itemID string, to, cc []string, subject, body, bodyType string) error {
+// draftUpdateXML baut die UpdateItem-Anfrage für einen Entwurf. Eigene
+// Funktion, damit sich prüfen lässt, was verschickt wird, ohne Server.
+//
+// An und Cc werden gesetzt oder geleert — sie stehen im Schreibfenster, also
+// weiß es, was richtig ist. Bcc nur, wenn etwas da ist: was Outlook dort
+// eingetragen hat, liest hier niemand, und es leer zu überschreiben, hieße
+// es zu löschen.
+func draftUpdateXML(itemID string, to, cc, bcc []string, subject, body, bodyType string) string {
 	var updates strings.Builder
 
 	updates.WriteString(fmt.Sprintf(`
@@ -689,7 +720,15 @@ func (c *ewsClient) updateDraft(itemID string, to, cc []string, subject, body, b
     </t:DeleteItemField>`)
 	}
 
-	_, err := c.do(fmt.Sprintf(`
+	if len(bcc) > 0 {
+		updates.WriteString(fmt.Sprintf(`
+    <t:SetItemField>
+      <t:FieldURI FieldURI="message:BccRecipients"/>
+      <t:Message><t:BccRecipients>%s</t:BccRecipients></t:Message>
+    </t:SetItemField>`, buildMailboxList(bcc)))
+	}
+
+	return fmt.Sprintf(`
 <m:UpdateItem MessageDisposition="SaveOnly" ConflictResolution="AlwaysOverwrite">
   <m:ItemChanges>
     <t:ItemChange>
@@ -698,7 +737,38 @@ func (c *ewsClient) updateDraft(itemID string, to, cc []string, subject, body, b
       </t:Updates>
     </t:ItemChange>
   </m:ItemChanges>
-</m:UpdateItem>`, xmlEscape(itemID), updates.String()), "UpdateItem")
+</m:UpdateItem>`, xmlEscape(itemID), updates.String())
+}
+
+// draftAktualisieren schreibt einen Entwurf und prüft, ob Exchange das
+// angenommen hat. Liefert den neuen ChangeKey — SendItem braucht ihn.
+//
+// Vorher wurde die Antwort nicht gelesen: c.do prüft nur den HTTP-Status,
+// und ein „Error" von Exchange kam als Erfolg zurück.
+func (c *ewsClient) draftAktualisieren(itemID string, to, cc, bcc []string, subject, body, bodyType string) (string, error) {
+	resp, err := c.do(draftUpdateXML(itemID, to, cc, bcc, subject, body, bodyType), "UpdateItem")
+	if err != nil {
+		return "", err
+	}
+	var env ewsEnvelope
+	if err := xml.Unmarshal(resp, &env); err != nil {
+		return "", fmt.Errorf("parse UpdateItem response: %w", err)
+	}
+	if env.Body.UpdateItemResponse == nil || len(env.Body.UpdateItemResponse.Messages) == 0 {
+		return "", fmt.Errorf("UpdateItem: leere Antwort")
+	}
+	m := env.Body.UpdateItemResponse.Messages[0]
+	if m.ResponseClass != "Success" {
+		return "", fmt.Errorf("UpdateItem failed: %s", m.MessageText)
+	}
+	if len(m.Items) > 0 {
+		return m.Items[0].ItemID.ChangeKey, nil
+	}
+	return "", nil
+}
+
+func (c *ewsClient) updateDraft(itemID string, to, cc []string, subject, body, bodyType string) error {
+	_, err := c.draftAktualisieren(itemID, to, cc, nil, subject, body, bodyType)
 	return err
 }
 

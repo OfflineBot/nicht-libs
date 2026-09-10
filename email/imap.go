@@ -30,6 +30,7 @@ type EmailSummary struct {
 	SenderName     string     `json:"sender_name"`
 	SenderEmail    string     `json:"sender_email"`
 	ToRecipients   []string   `json:"to_recipients,omitempty"`
+	CcRecipients   []string   `json:"cc_recipients,omitempty"`
 	Received       time.Time  `json:"received"`
 	IsRead         bool       `json:"is_read"`
 	HasAttachments bool       `json:"has_attachments"`

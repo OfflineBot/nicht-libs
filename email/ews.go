@@ -382,6 +382,14 @@ func DeleteEmailByID(server, username, password, itemID string) error {
 	return c.deleteItem(itemID)
 }
 
+// DeleteEmailPermanent löscht eine Nachricht endgültig — sie landet nicht im
+// Papierkorb. Für das, was keine Kopie hinterlassen darf: ein Entwurf, der
+// gerade abgeschickt wurde, oder etwas, das man aus dem Papierkorb löscht.
+func DeleteEmailPermanent(server, username, password, itemID string) error {
+	c := newEWSClient(server, username, password)
+	return c.deleteItemHard(itemID)
+}
+
 // SendEmail composes and sends a new email via EWS CreateItem.
 func SendEmail(server, username, password string, to, cc, bcc []string, subject, body string, html bool) error {
 	slog.Debug("ews: SendEmail", "server", server, "user", username, "to", to, "subject", subject)
@@ -767,13 +775,25 @@ func (c *ewsClient) markRead(itemID string) error {
 	return err
 }
 
-func (c *ewsClient) deleteItem(itemID string) error {
-	_, err := c.do(fmt.Sprintf(`
-<m:DeleteItem DeleteType="MoveToDeletedItems">
+// deleteItemXML baut die Anfrage. Eigene Funktion, damit sich die Art des
+// Löschens prüfen lässt, ohne einen Server zu brauchen.
+func deleteItemXML(itemID, art string) string {
+	return fmt.Sprintf(`
+<m:DeleteItem DeleteType="%s">
   <m:ItemIds>
     <t:ItemId Id="%s"/>
   </m:ItemIds>
-</m:DeleteItem>`, xmlEscape(itemID)), "DeleteItem")
+</m:DeleteItem>`, art, xmlEscape(itemID))
+}
+
+func (c *ewsClient) deleteItem(itemID string) error {
+	_, err := c.do(deleteItemXML(itemID, "MoveToDeletedItems"), "DeleteItem")
+	return err
+}
+
+// deleteItemHard löscht endgültig, ohne Umweg über den Papierkorb.
+func (c *ewsClient) deleteItemHard(itemID string) error {
+	_, err := c.do(deleteItemXML(itemID, "HardDelete"), "DeleteItem")
 	return err
 }
 
